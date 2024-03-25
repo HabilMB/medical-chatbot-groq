@@ -36,9 +36,6 @@ Helpful answer:
 """
 
 def set_custom_prompt():
-    """
-    Prompt template for QA retrieval for each vectorstore
-    """
     prompt = PromptTemplate(template=custom_prompt_template,
                             input_variables=['context', 'question'])
     return prompt

@@ -23,7 +23,6 @@ def create_vector_db():
                                   model_kwargs={'device': 'cpu'})
 
     db = Chroma.from_documents(texts, embeddings, persist_directory=DB_CHROMA_PATH)
-    #db.save_local(DB_CHROMA_PATH)
 
 if __name__ == "__main__":
     create_vector_db()
