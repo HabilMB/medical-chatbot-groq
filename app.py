@@ -1,122 +1,99 @@
-import PyPDF2
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain.chains import ConversationalRetrievalChain
 from langchain_community.chat_models import ChatOllama
 from langchain_groq import ChatGroq
-from langchain.memory import ChatMessageHistory, ConversationBufferMemory
 import chainlit as cl
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
+from langchain_community.embeddings import OllamaEmbeddings
+import os
 
+# you can load your groq api key from system variables, or you can input it to the .env file
 # for chainlit, .env is loaded automatically
 #from dotenv import load_dotenv
 #load_dotenv()  #
-#groq_api_key = os.environ['GROQ_API_KEY']
+groq_api_key = os.environ['GROQ_API_KEY']
 
-llm_local = ChatOllama(model="mistral:instruct")
+#if you want to use local ollama model
+#llm_local = ChatOllama(model="mistral:instruct")
 llm_groq = ChatGroq(
-            #groq_api_key=groq_api_key,
+            groq_api_key=groq_api_key,
             #model_name='llama2-70b-4096' 
             model_name='mixtral-8x7b-32768'
     )
 
+DB_CHROMA_PATH = 'vectorstore/db_chroma'
+
+custom_prompt_template = """You are a friendly and helpful medical chatbot. Use the following pieces of information to answer the user's question.
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+
+Context: {context}
+Question: {question}
+
+Only return the helpful answer below.
+Helpful answer:
+"""
+
+def set_custom_prompt():
+    """
+    Prompt template for QA retrieval for each vectorstore
+    """
+    prompt = PromptTemplate(template=custom_prompt_template,
+                            input_variables=['context', 'question'])
+    return prompt
+
+#Retrieval QA Chain
+def retrieval_qa_chain(llm, prompt, db):
+    qa_chain = RetrievalQA.from_chain_type(llm=llm,
+                                       chain_type='stuff',
+                                       retriever=db.as_retriever(search_kwargs={'k': 2}),
+                                       return_source_documents=True,
+                                       chain_type_kwargs={'prompt': prompt}
+                                       )
+    return qa_chain
+
+#QA Model Function
+def qa_bot():
+    embeddings = OllamaEmbeddings(model="nomic-embed-text",  
+                                  model_kwargs={'device': 'cpu'})
+    db = Chroma(persist_directory=DB_CHROMA_PATH, embedding_function=embeddings)
+    llm = llm_groq
+    qa_prompt = set_custom_prompt()
+    qa = retrieval_qa_chain(llm, qa_prompt, db)
+
+    return qa
+
+#output function
+def final_result(query):
+    qa_result = qa_bot()
+    response = qa_result({'query': query})
+    return response
+
+#chainlit code
 @cl.on_chat_start
-async def on_chat_start():
-    
-    files = None #Initialize variable to store uploaded files
-
-    # Wait for the user to upload a file
-    while files is None:
-        files = await cl.AskFileMessage(
-            content="Please upload a pdf file to begin!",
-            accept=["application/pdf"],
-            max_size_mb=100,
-            timeout=180, 
-        ).send()
-
-    file = files[0] # Get the first uploaded file
-    
-    # Inform the user that processing has started
-    msg = cl.Message(content=f"Processing `{file.name}`...")
+async def start():
+    chain = qa_bot()
+    msg = cl.Message(content="Starting the bot...")
     await msg.send()
-
-    # Read the PDF file
-    pdf = PyPDF2.PdfReader(file.path)
-    pdf_text = ""
-    for page in pdf.pages:
-        pdf_text += page.extract_text()
-        
-
-    # Split the text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_text(pdf_text)
-
-    # Create a metadata for each chunk
-    metadatas = [{"source": f"{i}-pl"} for i in range(len(texts))]
-
-    # Create a Chroma vector store
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    #embeddings = OllamaEmbeddings(model="llama2:7b")
-    docsearch = await cl.make_async(Chroma.from_texts)(
-        texts, embeddings, metadatas=metadatas
-    )
-    
-    # Initialize message history for conversation
-    message_history = ChatMessageHistory()
-    
-    # Memory for conversational context
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        output_key="answer",
-        chat_memory=message_history,
-        return_messages=True,
-    )
-
-    # Create a chain that uses the Chroma vector store
-    chain = ConversationalRetrievalChain.from_llm(
-        llm = llm_local,
-        chain_type="stuff",
-        retriever=docsearch.as_retriever(),
-        memory=memory,
-        return_source_documents=True,
-    )
-
-    # Let the user know that the system is ready
-    msg.content = f"Processing `{file.name}` done. You can now ask questions!"
+    msg.content = "Hello, I'm a Medical Bot. Ask away any medical questions!"
     await msg.update()
-    #store the chain in user session
-    cl.user_session.set("chain", chain)
 
+    cl.user_session.set("chain", chain)
 
 @cl.on_message
 async def main(message: cl.Message):
-        
-     # Retrieve the chain from user session
     chain = cl.user_session.get("chain") 
-    #call backs happens asynchronously/parallel 
-    cb = cl.AsyncLangchainCallbackHandler()
-    
-    # call the chain with user's message content
-    res = await chain.ainvoke(message.content, callbacks=[cb])
-    answer = res["answer"]
-    source_documents = res["source_documents"] 
+    cb = cl.AsyncLangchainCallbackHandler(
+        stream_final_answer=True, answer_prefix_tokens=["FINAL", "ANSWER"]
+    )
+    cb.answer_reached = True
+    res = await chain.acall(message.content, callbacks=[cb])
+    answer = res["result"]
+    sources = res["source_documents"]
 
-    text_elements = [] # Initialize list to store text elements
-    
-    # Process source documents if available
-    if source_documents:
-        for source_idx, source_doc in enumerate(source_documents):
-            source_name = f"source_{source_idx}"
-            # Create the text element referenced in the message
-            text_elements.append(
-                cl.Text(content=source_doc.page_content, name=source_name)
-            )
-        source_names = [text_el.name for text_el in text_elements]
-        
-         # Add source references to the answer
-        if source_names:
-            answer += f"\nSources: {', '.join(source_names)}"
-        else:
-            answer += "\nNo sources found"
-    #return results
-    await cl.Message(content=answer, elements=text_elements).send()
+    if sources:
+        answer += "\n" + f"\nSources:" + str(sources)
+    else:
+        answer += "\n" + "\nNo sources found"
+
+    await cl.Message(content=answer).send()
