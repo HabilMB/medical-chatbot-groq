@@ -10,6 +10,7 @@ import os
 
 # you can load your groq api key from system variables, or you can input it to the .env file
 # for chainlit, .env is loaded automatically
+
 #from dotenv import load_dotenv
 #load_dotenv()  #
 groq_api_key = os.environ['GROQ_API_KEY']
