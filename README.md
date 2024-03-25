@@ -1,1 +1,1 @@
-# rag-chat-with-pdf
+# medical-chatbot-groq
